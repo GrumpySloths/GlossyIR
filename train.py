@@ -25,7 +25,7 @@ import cv2
 
 try:
     from torch.utils.tensorboard import SummaryWriter
-
+    from datetime import datetime
     TENSORBOARD_FOUND = True
 except ImportError:
     TENSORBOARD_FOUND = False
@@ -468,6 +468,9 @@ def prepare_output_and_logger(args: GroupParams) -> Optional[SummaryWriter]:
             unique_str = str(uuid.uuid4())
         args.model_path = os.path.join("./output/", unique_str[0:10])
 
+    # Add timestamp to model path
+    timestamp = datetime.now().strftime("%Y%m%d_%H:%M:%S")
+    args.model_path = os.path.join(args.model_path, timestamp)
     # Set up output folder
     print(f"Output folder: {args.model_path}")
     os.makedirs(args.model_path, exist_ok=True)
