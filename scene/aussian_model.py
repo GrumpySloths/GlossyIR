@@ -448,7 +448,10 @@ class GaussianModel:
         albedo = torch.ones((fused_point_cloud.shape[0], 3), dtype=torch.float, device="cuda")
         roughness = torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda")
         metallic = torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda")
-
+        #高斯的优化使用nn.Parameter进行管理，方便后续计算图的构建以及使用优化器optimizer进行参数更新，使用nn.Parameter
+        #进行tensor注册的好处是其作为叶子节点会自动的将tensor的requires_grad属性设置为True，这样在反向传播的时候，这个
+        # tensor的梯度就会被计算,而一般的叶子节点或创建的tensor其默认的requires_grad属性是False，反向传播时不会计算梯度，
+        #进而也就不会被更新
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
         self._features_dc = nn.Parameter(
             features[:, :, 0:1].transpose(1, 2).contiguous().requires_grad_(True)

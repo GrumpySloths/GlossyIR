@@ -173,6 +173,8 @@ def render(
 
     # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
     screenspace_points = torch.zeros_like(xyz, dtype=pc.get_anchor.dtype, requires_grad=True, device="cuda") + 0
+    #这里使用retain_grad()是因为对于高斯来说非叶子节点的梯度是不会被保存的，所以这里需要手动保存，其梯度才会被记录下来，但不管
+    #是否使用retain_grad()整个计算图都会被保存下来，即反向传播过程中该被计算的梯度都会被计算的
     if retain_grad:
         try:
             screenspace_points.retain_grad()
