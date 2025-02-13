@@ -41,7 +41,8 @@ def get_envmap_dirs(res: List[int] = [256, 512]) -> Tuple[torch.Tensor, torch.Te
 
     reflvec = torch.stack((sintheta * sinphi, costheta, -sintheta * cosphi), dim=-1)  # [H, W, 3]
 
-    # get solid angles
+    # get solid angles,这里的立体角计算是对立体角微分公式的离散化近似 dΩ = sinθ dθ dφ
+    #离散化近似后为ΔΩ ≈ (cosθ_i - cosθ_{i+1}) * Δφ, costheta - torch.cos(gy * np.pi + d_theta) 对应 cosθ_i - cosθ_{i+Δθ}
     solid_angles = ((costheta - torch.cos(gy * np.pi + d_theta)) * d_phi)[..., None]  # [H, W, 1]
     print(f"solid_angles_sum error: {solid_angles.sum() - 4 * np.pi}")
 
@@ -125,7 +126,7 @@ if __name__ == "__main__":
     gaussians.restore(model_params)
 
     # Set up rasterization configuration
-    res = args.cubemap_res
+    res = args.cubemap_res  #cubemap_res:256
     bg_color = torch.zeros([3, res, res], device="cuda")
     # # NOTE: for debuging HDRi
     bg_colors = [
@@ -145,7 +146,9 @@ if __name__ == "__main__":
     # 4-yellow
     bg_colors[4][:2, ...] = 1
 
-    # NOTE: capture 6 views with fov=90
+    # NOTE: capture 6 views with fov=90，注意这里fov设置为90度是必须的，只有这样的设置才可以保证该cube map贴图正好无重叠且完整的
+    # 捕获到整个360度的全景场景，每个面正好捕获到1/6的场景，或者说每个面对应 2/3pi 的立体角
+    
     rotations: List[torch.Tensor] = [
         #这里的旋转矩阵实际对应着MVP变换中的View矩阵
         torch.tensor(
@@ -208,7 +211,7 @@ if __name__ == "__main__":
 
     # positions = torch.ones([1, 3]).cuda()
     prods = list(itertools.product(range(args.occlu_res), range(args.occlu_res), range(args.occlu_res)))
-    aabb_min = torch.tensor([-args.bound] * 3).cuda()
+    aabb_min = torch.tensor([-args.bound] * 3).cuda() #bound 1.5 [-1.5, -1.5, -1.5]
     aabb_max = torch.tensor([args.bound] * 3).cuda()
 
     grid = (aabb_max - aabb_min) / (args.occlu_res - 1)
@@ -216,7 +219,7 @@ if __name__ == "__main__":
 
     # init occlusion volume
     occlu_sh_degree = 4
-    occlusion_threshold = args.occlusion
+    occlusion_threshold = args.occlusion #occlusion 0.25
     valid_mask = torch.zeros([args.occlu_res, args.occlu_res, args.occlu_res]).bool().cuda()
     points = gaussians.get_xyz
     #quat 保存的是每个Gaussian点在occlusion volume中的网格坐标
@@ -248,7 +251,7 @@ if __name__ == "__main__":
         )
         * -1
     ).cuda()
-    #这里是为在occlusion volume中拥有高斯点的网格坐标分配一个唯一的id
+    #这里是为在occlusion volume中拥有高斯点的网格坐标分配一个唯一的id,并按照正常序列进行排序
     occlusion_ids[xyz_ids[0].tolist(), xyz_ids[1].tolist(), xyz_ids[2].tolist()] = torch.arange(
         num_grid, dtype=torch.int32
     ).cuda()
@@ -278,14 +281,16 @@ if __name__ == "__main__":
         solid_angles,  # [H, W, 1]
         envmap_dirs,  # [H, W, 3]
     ) = get_envmap_dirs()
+    #这里的compoents指的是对于每个入射方向其所对应的SH基系数离散化表示，即所谓的Y_lm(theta,phi)的离散化表示,用于后续的积分计算
     components = components_from_spherical_harmonics(occlu_sh_degree, envmap_dirs)  # [H, W, d2]
 
     # get canonical ray and its norm to normalize depth
     canonical_rays = get_canonical_rays(H=res, W=res, tan_fovx=1.0, tan_fovy=1.0)  # [HW, 3]
     norm = torch.norm(canonical_rays, p=2, dim=-1).reshape(res, res, 1)  # [H, W]
-
+    #下面的这整段代码其实就是在告诉你如何使用python 对数学公式像积分这种东西进行并行计算
     with torch.no_grad():
         for grid_id in trange(num_grid):
+            #这里的quat是合法的occlusion volume在3维网格坐标系下的网格坐标
             quat = torch.cat(torch.where(occlusion_ids == grid_id))
             #得到每个被高斯点占据的网格在aabb坐标系下的坐标
             position = positions[(quat[0] * args.occlu_res**2 + quat[1] * args.occlu_res + quat[2],)]
@@ -319,7 +324,7 @@ if __name__ == "__main__":
                     bg_color,
                     # bg_colors[r_idx],
                     valid_means3D,
-                    torch.Tensor([]),
+                    torch.Tensor([]), #precompute colors
                     valid_opacity,
                     valid_scales,
                     valid_rots,
@@ -345,7 +350,7 @@ if __name__ == "__main__":
                 depth_map = depth_map * (opacity_map > 0.5).float()  # NOTE: import to filter out the floater
                 depth_cubemap.append(depth_map.permute(1, 2, 0) * norm)
 
-            # convert cubemap to HDRI
+            # convert cubemap to HDRI,这里本质上texture纹理说白了就是一个函数映射关系，给定一个环境光方向，返回对应的深度值
             depth_envmap = dr.texture(
                 torch.stack(depth_cubemap)[None, ...],
                 envmap_dirs[None, ...].contiguous(),
@@ -356,7 +361,9 @@ if __name__ == "__main__":
                 0
             ]  # [H, W, 1]
 
-            # use SH to store the HDRI
+            # use SH to store the HDRI,注意这里使用一个threshold以及深度图来计算遮挡关系，在gaussian点上像法线，深度，以及遮挡
+            # 关系这些东西实际上都不算是严格的，而是一种粗略的近似以指导神经网络进行优化和学习，所以这里作者使用了一个阈值来控制遮挡关系，
+            # 对于间接光建模来说这是一种即为简单的近似，也是一个可以进行优化的点
             occlu_mask = (1 - (depth_envmap < occlusion_threshold).float()) + (depth_envmap == 0).float()  # [H, W, 1]
 
             weighted_color = occlu_mask * solid_angles  # [H, W, 1]

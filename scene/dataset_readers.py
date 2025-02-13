@@ -28,7 +28,7 @@ from scene.colmap_loader import (
     read_points3D_binary,
     read_points3D_text,
 )
-from scene.gaussian_model import BasicPointCloud
+from scene.aussian_model import BasicPointCloud
 from utils.graphics_utils import focal2fov, fov2focal, getWorld2View2
 from utils.sh_utils import SH2RGB
 
@@ -254,13 +254,19 @@ def readCamerasFromTransforms(
         image_name = Path(cam_name).stem
         image = Image.open(image_path)
 
-        # im_data = np.array(image.convert("RGBA"))
+        # Sample the image and save it for analysis
+        if idx==0 or idx==30:
+            sample_image_path = os.path.join("./samples_transforms", f"sample_{image_name}.png")
+            image.save(sample_image_path)
+        
+        im_data = np.array(image.convert("RGBA"))
 
-        # bg = np.array([1, 1, 1]) if white_background else np.array([0, 0, 0])
+        bg = np.array([1, 1, 1]) if white_background else np.array([0, 0, 0])
 
-        # norm_data = im_data / 255.0
-        # arr = norm_data[:, :, :3] * norm_data[:, :, 3:4] + bg * (1 - norm_data[:, :, 3:4])
-        # image = Image.fromarray(np.array(arr * 255.0, dtype=np.byte), "RGB")
+        norm_data = im_data / 255.0
+        arr = norm_data[:, :, :3] * norm_data[:, :, 3:4] + bg * (1 - norm_data[:, :, 3:4])
+        image = Image.fromarray(np.array(arr * 255.0, dtype=np.byte), "RGB")
+        
         if fovx == None:
             focal_length = contents["fl_x"]
             FovY = focal2fov(focal_length, image.size[1])
@@ -292,7 +298,7 @@ def readCamerasFromTransforms(
 
 
 def readNerfSyntheticInfo(
-    path: str, white_background: bool, eval: bool, extension: str = ".png"
+    path: str, white_background: bool, eval: bool, extension: str = ".png",ply_path=None
 ) -> SceneInfo:
     print("Reading Training Transforms")
     train_cam_infos = readCamerasFromTransforms(
@@ -309,7 +315,9 @@ def readNerfSyntheticInfo(
 
     nerf_normalization = getNerfppNorm(train_cam_infos)
 
-    ply_path = os.path.join(path, "points3d.ply")
+    # ply_path = os.path.join(path, "points3d.ply")
+    if ply_path is None:
+        ply_path = os.path.join(path, "points3d.ply")
     if not os.path.exists(ply_path):
         # Since this data set has no colmap data, we start with random points
         num_pts = 100_000

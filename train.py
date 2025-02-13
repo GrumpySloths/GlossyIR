@@ -22,10 +22,11 @@ from utils.general_utils import safe_state
 from utils.image_utils import psnr, turbo_cmap
 from utils.loss_utils import l1_loss, ssim
 import cv2
+import torchvision
 
 try:
     from torch.utils.tensorboard import SummaryWriter
-
+    from datetime import datetime
     TENSORBOARD_FOUND = True
 except ImportError:
     TENSORBOARD_FOUND = False
@@ -137,12 +138,24 @@ def training(
     env_tv_weight: float = 0.01,
     bound: float = 1.5,
     indirect: bool = False,
+    pbr_training:bool=False,
 ) -> None:
     first_iter = 0
-    gaussians = GaussianModel(dataset.sh_degree)  #dataset.sh_degree=3
-    scene = Scene(dataset, gaussians)
-    gaussians.training_setup(opt)
+    # gaussians = GaussianModel(dataset.sh_degree)  #dataset.sh_degree=3
+
+    gaussians = GaussianModel()  #dataset.sh_degree=3
+    #根据是否进行pbr_training选择是初始化场景还是从已经训练好的场景中加载数据
+    if pbr_training:
+        first_iter=pbr_iteration
+        scene = Scene(dataset, gaussians,load_iteration=pbr_iteration)
+        gaussians.train()
+    else:
+        scene = Scene(dataset, gaussians)
+    # gaussians.training_setup(opt)
+    gaussians.training_setup_anchor(opt)
+
     tb_writer = prepare_output_and_logger(dataset)
+    print("dataset.model_path:",dataset.model_path)
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda") #[0,0,0]
@@ -158,6 +171,7 @@ def training(
     aabb = torch.tensor([-bound, -bound, -bound, bound, bound, bound]).cuda()
     irradiance_volumes = IrradianceVolumes(aabb=aabb).cuda() #这里应该aabb以及每个分辨率的voxel上的irradiance系数都是可以学习的
     irradiance_volumes.train()
+    # 光照渲染和优化模块
     param_groups = [
         {
             "name": "irradiance_volumes",
@@ -172,14 +186,15 @@ def training(
                                                     #需要经过一个变换将其转化到其他视角空间下
     # load checkpoint
     if checkpoint_path:
-        checkpoint = torch.load(checkpoint_path)
-        model_params = checkpoint["gaussians"]
-        first_iter = checkpoint["iteration"]
+        (model_params,first_iter) = torch.load(checkpoint_path)
+        # checkpoint = torch.load(checkpoint_path)
+        # model_params = checkpoint[0]
+        # first_iter = checkpoint[1]
         # cubemap_params = checkpoint["cubemap"]
         # light_optimizer_params = checkpoint["light_optimizer"]
         # irradiance_volumes_params = checkpoint["irradiance_volumes"]
 
-        gaussians.restore(model_params, opt)
+        gaussians.restore_anchor(model_params, opt)
         # cubemap.load_state_dict(cubemap_params)
         # light_optimizer.load_state_dict(light_optimizer_params)
         print(f"Load checkpoint from {checkpoint_path}")
@@ -190,7 +205,7 @@ def training(
     progress_bar = trange(first_iter, opt.iterations, desc="Training progress")  # For logging
 
     occlusion_volumes: Dict = {}
-    occlusion_flag = True
+    occlusion_flag = False 
     occlusion_ids: torch.Tensor
     occlusion_coefficients: torch.Tensor
     occlusion_degree: int
@@ -223,13 +238,19 @@ def training(
         else:  # NOTE: black background for PBR
             # background = torch.zeros_like(bg)
             background=torch.tensor([1., 1., 1.], device="cuda")
+
+        voxel_visible_mask = torch.ones(gaussians.get_anchor.shape[0],dtype=torch.bool,device="cuda") 
+        retain_grad = (iteration < opt.update_until and iteration >= 0) #opt.update_until = 15000
         rendering_result = render(
             viewpoint_camera=viewpoint_cam,
             pc=gaussians,
             pipe=pipe,
             bg_color=background,
             derive_normal=True,
+            visible_mask=voxel_visible_mask,
+            retain_grad=retain_grad
         )
+
         image = rendering_result["render"]  # [3, H, W]
         viewspace_point_tensor = rendering_result["viewspace_points"]
         visibility_filter = rendering_result["visibility_filter"]
@@ -240,6 +261,10 @@ def training(
         albedo_map = rendering_result["albedo_map"]  # [3, H, W]
         roughness_map = rendering_result["roughness_map"]  # [1, H, W]
         metallic_map = rendering_result["metallic_map"]  # [1, H, W]
+        # anchor 属性添加和扩展
+        offset_selection_mask=rendering_result["selection_mask"]
+        scaling=rendering_result["scaling"]
+        opacity=rendering_result["neural_opacity"]
 
         # formulate roughness
         rmax, rmin = 1.0, 0.04
@@ -258,6 +283,10 @@ def training(
         alpha_mask = viewpoint_cam.gt_alpha_mask.cuda() #alpha_mask shape:(1,800,800)
         #打印alpha_mask的shape
         # print("alpha_mask shape:",alpha_mask.cpu().numpy().shape)
+        gt_image_save_beforeMask=gt_image.permute(1, 2, 0).cpu().numpy()
+        gt_image_save_beforeMask = (gt_image_save_beforeMask * 255).astype(np.uint8)
+        cv2.imwrite("gt_image_beforeMask.png", gt_image_save_beforeMask)
+        
         gt_image = (gt_image * alpha_mask + background[:, None, None] * (1.0 - alpha_mask)).clamp(0.0, 1.0)
         #将gt_image保存为图片
         gt_image_save = gt_image.permute(1, 2, 0).cpu().numpy()
@@ -268,7 +297,8 @@ def training(
         Ll1 = F.l1_loss(image, gt_image)
         normal_loss = 0.0
         if iteration <= pbr_iteration:
-            loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
+            scaling_reg = scaling.prod(dim=1).mean()
+            loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))+ 0.01*scaling_reg
             # normal loss
             normal_loss_weight = 1.0
             #一个奇怪的疑问：为什么需要设置掩码mask呢? 回答:这里是利用通过depth得到的有效normal来约束每个高斯点上实际的normal
@@ -374,6 +404,10 @@ def training(
             env_tv_loss = tv_h1 + tv_w1
             loss += env_tv_loss * env_tv_weight
 
+        # Add print statements to check the shapes of the gradients
+        # for name, param in gaussians.named_parameters():
+        #     if param.grad is not None:
+        #         print(f"Gradient for {name}: {param.grad.shape}")
         loss.backward()
 
         iter_end.record()
@@ -381,6 +415,7 @@ def training(
         with torch.no_grad():
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
+
             if iteration % 10 == 0:
                 progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}"})
                 progress_bar.update(10)
@@ -388,12 +423,15 @@ def training(
                 progress_bar.close()
 
             # Log and save
-            training_report(
+            # training_report_anchor(tb_writer, "v1-anchor_test", iteration, Ll1, loss, l1_loss,
+            #                        iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background) )
+            training_report_anchor(
                 tb_writer=tb_writer,
+                dataset_name="v1_anchor_test",
                 iteration=iteration,
                 Ll1=Ll1,
-                normal_loss=normal_loss,
                 loss=loss,
+                l1_loss=l1_loss,
                 elapsed=iter_start.elapsed_time(iter_end),
                 testing_iterations=testing_iterations,
                 scene=scene,
@@ -404,60 +442,119 @@ def training(
                 metallic=metallic,
                 tone=tone,
                 gamma=gamma,
-                renderArgs=(pipe, background),
-                occlusion_volumes=occlusion_volumes,
-                irradiance_volumes=irradiance_volumes,
-                indirect=indirect,
+                renderFunc=render,
+                renderArgs=(pipe, background), 
             )
-            # NOTE: we same .pth instead of point cloud for additional irradiance volumes and cubemap
-            # if iteration in saving_iterations:
-            #    print(f"\n[ITER {iteration}] Saving Gaussians")
-            #    scene.save(iteration)
-
-            # Densification
-            if iteration < opt.densify_until_iter:
-                # Keep track of max radii in image-space for pruning
-                gaussians.max_radii2D[visibility_filter] = torch.max(
-                    gaussians.max_radii2D[visibility_filter], radii[visibility_filter]
-                )
-                gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
-
-                if (
-                    iteration > opt.densify_from_iter
-                    and iteration % opt.densification_interval == 0
-                ):
-                    size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                    gaussians.densify_and_prune(
-                        opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold
-                    )
-
-                if iteration % opt.opacity_reset_interval == 0 or (
-                    dataset.white_background and iteration == opt.densify_from_iter
-                ):
-                    gaussians.reset_opacity()
-
+            
+            if (iteration in saving_iterations):
+                # scene.save(iteration)
+                scene.save_anchor(iteration)
+            
+            # densification
+            if iteration < opt.update_until and iteration > opt.start_stat: #opt.start_stat:500
+                # add statis
+                gaussians.training_statis(viewspace_point_tensor, opacity, visibility_filter, offset_selection_mask, voxel_visible_mask)
+                
+                # densification
+                if iteration > opt.update_from and iteration % opt.update_interval == 0: #opt.update_interval:100 opt.update_from:1500 opt.min_opacity:0.005
+                    gaussians.adjust_anchor(check_interval=opt.update_interval, success_threshold=opt.success_threshold, grad_threshold=opt.densify_grad_threshold, min_opacity=opt.min_opacity)
+            elif iteration == opt.update_until:
+                del gaussians.opacity_accum
+                del gaussians.offset_gradient_accum
+                del gaussians.offset_denom
+                torch.cuda.empty_cache()  #这里应该是不再用到的tensor进行删除并清空缓存以提高运行效率
+                    
             # Optimizer step
             if iteration < opt.iterations:
                 gaussians.optimizer.step()
-                gaussians.optimizer.zero_grad(set_to_none=True)
-                gaussians.update_learning_rate(iteration)
+                gaussians.optimizer.zero_grad(set_to_none = True)
                 if iteration >= pbr_iteration:
                     light_optimizer.step()
                     light_optimizer.zero_grad(set_to_none=True)
                     cubemap.clamp_(min=0.0)
+            if (iteration in checkpoint_iterations):
+                torch.save((gaussians.capture_anchor(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
 
-            if iteration in checkpoint_iterations:
-                print(f"\n[ITER {iteration}] Saving Checkpoint")
-                torch.save(
-                    {
-                        "gaussians": gaussians.capture(),
-                        "cubemap": cubemap.state_dict(),
-                        "irradiance_volumes": irradiance_volumes.state_dict(),
-                        "light_optimizer": light_optimizer.state_dict(),
-                        "iteration": iteration,
-                    },
-                    scene.model_path + "/chkpnt" + str(iteration) + ".pth",
-                )
+        # with torch.no_grad():
+        #     # Progress bar
+        #     ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
+        #     if iteration % 10 == 0:
+        #         progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}"})
+        #         progress_bar.update(10)
+        #     if iteration == opt.iterations:
+        #         progress_bar.close()
+
+        #     # Log and save
+        #     training_report(
+        #         tb_writer=tb_writer,
+        #         iteration=iteration,
+        #         Ll1=Ll1,
+        #         normal_loss=normal_loss,
+        #         loss=loss,
+        #         elapsed=iter_start.elapsed_time(iter_end),
+        #         testing_iterations=testing_iterations,
+        #         scene=scene,
+        #         light=cubemap,
+        #         brdf_lut=brdf_lut,
+        #         canonical_rays=canonical_rays,
+        #         pbr_iteration=pbr_iteration,
+        #         metallic=metallic,
+        #         tone=tone,
+        #         gamma=gamma,
+        #         renderArgs=(pipe, background),
+        #         occlusion_volumes=occlusion_volumes,
+        #         irradiance_volumes=irradiance_volumes,
+        #         indirect=indirect,
+        #     )
+        #     # NOTE: we same .pth instead of point cloud for additional irradiance volumes and cubemap
+        #     # if iteration in saving_iterations:
+        #     #    print(f"\n[ITER {iteration}] Saving Gaussians")
+        #     #    scene.save(iteration)
+
+        #     # Densification
+        #     if iteration < opt.densify_until_iter:
+        #         # Keep track of max radii in image-space for pruning
+        #         gaussians.max_radii2D[visibility_filter] = torch.max(
+        #             gaussians.max_radii2D[visibility_filter], radii[visibility_filter]
+        #         )
+        #         gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
+
+        #         if (
+        #             iteration > opt.densify_from_iter
+        #             and iteration % opt.densification_interval == 0
+        #         ):
+        #             size_threshold = 20 if iteration > opt.opacity_reset_interval else None
+        #             gaussians.densify_and_prune(
+        #                 opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold
+        #             )
+
+        #         if iteration % opt.opacity_reset_interval == 0 or (
+        #             dataset.white_background and iteration == opt.densify_from_iter
+        #         ):
+        #             gaussians.reset_opacity()
+
+        #     # Optimizer step
+        #     if iteration < opt.iterations:
+        #         gaussians.optimizer.step()
+        #         gaussians.optimizer.zero_grad(set_to_none=True)
+        #         gaussians.update_learning_rate(iteration)
+        #         if iteration >= pbr_iteration:
+        #             light_optimizer.step()
+        #             light_optimizer.zero_grad(set_to_none=True)
+        #             cubemap.clamp_(min=0.0)
+
+        #     if iteration in checkpoint_iterations:
+        #         print(f"\n[ITER {iteration}] Saving Checkpoint")
+        #         torch.save(
+        #             {
+        #                 "gaussians": gaussians.capture(),
+        #                 "cubemap": cubemap.state_dict(),
+        #                 "irradiance_volumes": irradiance_volumes.state_dict(),
+        #                 "light_optimizer": light_optimizer.state_dict(),
+        #                 "iteration": iteration,
+        #             },
+        #             scene.model_path + "/chkpnt" + str(iteration) + ".pth",
+        #         )
 
 
 def prepare_output_and_logger(args: GroupParams) -> Optional[SummaryWriter]:
@@ -468,6 +565,9 @@ def prepare_output_and_logger(args: GroupParams) -> Optional[SummaryWriter]:
             unique_str = str(uuid.uuid4())
         args.model_path = os.path.join("./output/", unique_str[0:10])
 
+    # Add timestamp to model path
+    timestamp = datetime.now().strftime("%Y%m%d_%H:%M:%S")
+    args.model_path = os.path.join(args.model_path, timestamp)
     # Set up output folder
     print(f"Output folder: {args.model_path}")
     os.makedirs(args.model_path, exist_ok=True)
@@ -481,6 +581,205 @@ def prepare_output_and_logger(args: GroupParams) -> Optional[SummaryWriter]:
     else:
         print("Tensorboard not available: not logging progress")
     return tb_writer
+
+def training_report_anchor( tb_writer, dataset_name, iteration, Ll1, loss, 
+                            l1_loss, elapsed, testing_iterations, scene : Scene, 
+                            light: CubemapLight,
+                            brdf_lut: torch.Tensor,
+                            canonical_rays: torch.Tensor,
+                            pbr_iteration: int,
+                            metallic: bool,
+                            tone: bool,
+                            gamma: bool,
+                            renderFunc, renderArgs, wandb=None, logger=None):
+    if tb_writer:
+        tb_writer.add_scalar(f'{dataset_name}/train_loss_patches/l1_loss', Ll1.item(), iteration)
+        tb_writer.add_scalar(f'{dataset_name}/train_loss_patches/total_loss', loss.item(), iteration)
+        tb_writer.add_scalar(f'{dataset_name}/iter_time', elapsed, iteration)
+
+
+    if wandb is not None:
+        wandb.log({"train_l1_loss":Ll1, 'train_total_loss':loss, })
+    
+    # Report test and samples of training set
+    if iteration in testing_iterations:
+        scene.gaussians.eval()
+        torch.cuda.empty_cache()
+        validation_configs = ({'name': 'test', 'cameras' : scene.getTestCameras()}, 
+                              {'name': 'train', 'cameras' : [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(5, 30, 5)]})
+
+        for config in validation_configs:
+            if config['cameras'] and len(config['cameras']) > 0:
+                l1_test = 0.0
+                psnr_test = 0.0
+                
+                if wandb is not None:
+                    gt_image_list = []
+                    render_image_list = []
+                    errormap_list = []
+
+                for idx, viewpoint in enumerate(config['cameras']):
+                    # voxel_visible_mask = prefilter_voxel(viewpoint, scene.gaussians, *renderArgs)
+                    voxel_visible_mask=torch.ones(scene.gaussians.get_anchor.shape[0],dtype=torch.bool,device="cuda")
+                    render_result = renderFunc(viewpoint, scene.gaussians, *renderArgs, visible_mask=voxel_visible_mask)
+                    image=torch.clamp(render_result["render"], 0.0, 1.0)
+                    depth_map = render_result["depth_map"]
+                    normal_map = render_result["normal_map"]
+                    normal_map_from_depth = render_result["normal_map_from_depth"]
+                    # image = torch.clamp(renderFunc(viewpoint, scene.gaussians, *renderArgs, visible_mask=voxel_visible_mask)["render"], 0.0, 1.0)
+                    image=torch.clamp(render_result["render"], 0.0, 1.0)
+                    gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
+                    #pbr feature
+                    albedo_map = render_result["albedo_map"]  # [3, H, W]
+                    roughness_map = render_result["roughness_map"]  # [1, H, W]
+                    metallic_map = render_result["metallic_map"]  # [1, H, W]
+                    brdf_map = torch.cat(
+                        [
+                            albedo_map,
+                            torch.tile(roughness_map, (3, 1, 1)),
+                            torch.tile(metallic_map, (3, 1, 1)),
+                        ],
+                        dim=2,
+                    )  # [3, H, 3W]
+                    # NOTE: PBR record
+                    if iteration > pbr_iteration:
+                        H, W = viewpoint.image_height, viewpoint.image_width
+                        c2w = torch.inverse(viewpoint.world_view_transform.T)  # [4, 4]
+                        view_dirs = -(
+                            (
+                                F.normalize(canonical_rays[:, None, :], p=2, dim=-1)
+                                * c2w[None, :3, :3]
+                            )  # [HW, 3, 3]
+                            .sum(dim=-1)
+                            .reshape(H, W, 3)
+                        )  # [H, W, 3]
+                        normal_mask = render_result["normal_mask"]
+                        
+                        occlusion = torch.ones_like(roughness_map).permute(1, 2, 0)  # [H, W, 1]
+                        irradiance = torch.zeros_like(roughness_map).permute(
+                            1, 2, 0
+                        )  # [H, W, 1]
+                        
+                        # build mip for environment light
+                        light.build_mips()
+                        pbr_result = pbr_shading(
+                            light=light,
+                            normals=normal_map.permute(1, 2, 0),  # [H, W, 3]
+                            view_dirs=view_dirs,
+                            mask=normal_mask.permute(1, 2, 0),  # [H, W, 1]
+                            albedo=albedo_map.permute(1, 2, 0),  # [H, W, 3]
+                            roughness=roughness_map.permute(1, 2, 0),  # [H, W, 1]
+                            metallic=metallic_map.permute(1, 2, 0)
+                            if metallic
+                            else None,  # [H, W, 1]
+                            tone=tone,
+                            gamma=gamma,
+                            brdf_lut=brdf_lut,
+                            occlusion=occlusion,
+                            irradiance=irradiance,
+                        )
+                        diffuse_rgb = (
+                            pbr_result["diffuse_rgb"].clamp(min=0.0, max=1.0).permute(2, 0, 1)
+                        )  # [3, H, W]
+                        specular_rgb = (
+                            pbr_result["specular_rgb"].clamp(min=0.0, max=1.0).permute(2, 0, 1)
+                        )  # [3, H, W]
+                        render_rgb = (
+                            pbr_result["render_rgb"].clamp(min=0.0, max=1.0).permute(2, 0, 1)
+                        )  # [3, H, W]
+                        # NOTE: mask render_rgb by depth map
+                        background = renderArgs[1]
+                        render_rgb = torch.where(
+                            normal_mask,
+                            render_rgb,
+                            background[:, None, None],
+                        )
+                        diffuse_rgb = torch.where(
+                            normal_mask,
+                            diffuse_rgb,
+                            background[:, None, None],
+                        )
+                        specular_rgb = torch.where(
+                            normal_mask,
+                            specular_rgb,
+                            background[:, None, None],
+                        )
+                        pbr_image = torch.cat(
+                            [render_rgb, diffuse_rgb, specular_rgb], dim=2
+                        )  # [3, H, 3W]
+                    else:
+                        zero_pad = torch.zeros_like(image)
+                        render_rgb = zero_pad
+                        pbr_image = torch.cat([zero_pad, zero_pad, zero_pad], dim=2)  # [3, H, 3W]
+                    # Save gt_image to local
+                    # gt_image_np = gt_image.permute(1, 2, 0).cpu().numpy()
+                    # gt_image_np = (gt_image_np * 255).astype(np.uint8)
+                    # gt_image_np=cv2.cvtColor(gt_image_np, cv2.COLOR_RGB2BGR)
+                    # cv2.imwrite(f"gt_image_{config['name']}_{viewpoint.image_name}_{iteration}.png", gt_image_np)
+                    if idx == 0:
+                        sample_dir = os.path.join(".", "samples")
+                        os.makedirs(sample_dir, exist_ok=True)
+                        torchvision.utils.save_image(image, os.path.join(sample_dir, f"render_{iteration}.png"))
+                        torchvision.utils.save_image(gt_image, os.path.join(sample_dir, f"gt_{iteration}.png"))
+                         
+                    if tb_writer and (idx < 5):
+                        tb_writer.add_images(f'{dataset_name}/'+config['name'] + "_view_{}/render".format(viewpoint.image_name), image[None], global_step=iteration)
+                        tb_writer.add_images(f'{dataset_name}/'+config['name'] + "_view_{}/errormap".format(viewpoint.image_name), (gt_image[None]-image[None]).abs(), global_step=iteration)
+                        tb_writer.add_images(f'{dataset_name}/'+config['name'] + "_view_{}/normal_map".format(viewpoint.image_name), normal_map[None], global_step=iteration)
+                        tb_writer.add_images(f'{dataset_name}/'+config['name'] + "_view_{}/normal_map_from_depth".format(viewpoint.image_name), normal_map_from_depth[None], global_step=iteration)
+                        tb_writer.add_images(f'{dataset_name}/'+config['name'] + "_view_{}/depth_map".format(viewpoint.image_name), depth_map[None], global_step=iteration)
+                        
+                        if iteration > pbr_iteration:
+                            #暂时稍微修改下
+                            tb_writer.add_images(f'{dataset_name}/'+config['name'] + "_view_{}/albedo_map".format(viewpoint.image_name), albedo_map[None], global_step=iteration)
+                            tb_writer.add_images(f'{dataset_name}/'+config['name'] + "_view_{}/metallic_map".format(viewpoint.image_name), metallic_map[None], global_step=iteration)
+                            tb_writer.add_images(f'{dataset_name}/'+config['name'] + "_view_{}/roughness_map".format(viewpoint.image_name), roughness_map[None], global_step=iteration)
+                            tb_writer.add_images(f'{dataset_name}/'+config['name'] + "_view_{}/pbr_render_rgb".format(viewpoint.image_name), render_rgb[None], global_step=iteration)
+                            tb_writer.add_images(f'{dataset_name}/'+config['name'] + "_view_{}/pbr_diffuse_rgb".format(viewpoint.image_name), diffuse_rgb[None], global_step=iteration)
+                            tb_writer.add_images(f'{dataset_name}/'+config['name'] + "_view_{}/pbr_specular_rgb".format(viewpoint.image_name), specular_rgb[None], global_step=iteration)
+                            tb_writer.add_images(
+                                f"{dataset_name}/{config['name']}_view_{viewpoint.image_name}_{idx}/brdf_map",
+                                resize_tensorboard_img(brdf_map, 2400)[None],
+                                global_step=iteration,
+                            )
+                            tb_writer.add_images(
+                                f"{dataset_name}/{config['name']}_view_{viewpoint.image_name}_{idx}/pbr_render",
+                                resize_tensorboard_img(pbr_image, 2400)[None],
+                                global_step=iteration,
+                            )
+                            
+                        if wandb:
+                            render_image_list.append(image[None])
+                            errormap_list.append((gt_image[None]-image[None]).abs())
+                            
+                        if iteration == testing_iterations[0]:
+                            tb_writer.add_images(f'{dataset_name}/'+config['name'] + "_view_{}/ground_truth".format(viewpoint.image_name), gt_image[None], global_step=iteration)
+                            if wandb:
+                                gt_image_list.append(gt_image[None])
+
+                    l1_test += l1_loss(image, gt_image).mean().double()
+                    psnr_test += psnr(image, gt_image).mean().double()
+
+                
+                
+                psnr_test /= len(config['cameras'])
+                l1_test /= len(config['cameras'])          
+                # logger.info("\n[ITER {}] Evaluating {}: L1 {} PSNR {}".format(iteration, config['name'], l1_test, psnr_test))
+                print("\n[ITER {}] Evaluating {}: L1 {} PSNR {}".format(iteration, config['name'], l1_test, psnr_test))
+
+                
+                if tb_writer:
+                    tb_writer.add_scalar(f'{dataset_name}/'+config['name'] + '/loss_viewpoint - l1_loss', l1_test, iteration)
+                    tb_writer.add_scalar(f'{dataset_name}/'+config['name'] + '/loss_viewpoint - psnr', psnr_test, iteration)
+                if wandb is not None:
+                    wandb.log({f"{config['name']}_loss_viewpoint_l1_loss":l1_test, f"{config['name']}_PSNR":psnr_test})
+
+        if tb_writer:
+            # tb_writer.add_histogram(f'{dataset_name}/'+"scene/opacity_histogram", scene.gaussians.get_opacity, iteration)
+            tb_writer.add_scalar(f'{dataset_name}/'+'total_points', scene.gaussians.get_anchor.shape[0], iteration)
+        torch.cuda.empty_cache()
+
+        scene.gaussians.train()
 
 
 def training_report(
@@ -749,13 +1048,13 @@ if __name__ == "__main__":
         "--test_iterations",
         nargs="+",
         type=int,
-        default=[100,7_000, 30_000, 37_000],
+        default=[100,1000,3000,7_000, 30_000, 30100,31000,37_000],
     )
     parser.add_argument(
         "--save_iterations",
         nargs="+",
         type=int,
-        default=[7_000, 30_000, 37_000],
+        default=[100,1000,3000,7_000, 30_000,30100,31000, 37_000],
     )
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[30_000])
@@ -769,6 +1068,7 @@ if __name__ == "__main__":
     parser.add_argument("--gamma", action="store_true", help="Enable linear_to_sRGB for gamma correction.")
     parser.add_argument("--metallic", action="store_true", help="Enable metallic material reconstruction.")
     parser.add_argument("--indirect", action="store_true", help="Enable indirect diffuse modeling.")
+    parser.add_argument("--pbr_training", action="store_true", help="Enable PBR training and inverse decomposition.")
     args = parser.parse_args(sys.argv[1:])
     args.test_iterations.append(args.iterations)
     args.save_iterations.append(args.iterations)
@@ -799,6 +1099,7 @@ if __name__ == "__main__":
         env_tv_weight=args.env_tv,
         bound=args.bound,
         indirect=args.indirect,
+        pbr_training=args.pbr_training,
     )
 
     # All done

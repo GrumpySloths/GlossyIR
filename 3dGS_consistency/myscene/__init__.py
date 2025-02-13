@@ -21,7 +21,7 @@ import torch.nn.functional as F
 from arguments import GroupParams
 from scene.cameras import Camera
 from scene.dataset_readers import sceneLoadTypeCallbacks
-from scene.gaussian_model import GaussianModel
+from scene.aussian_model import GaussianModel
 from utils.camera_utils import camera_to_JSON, cameraList_from_camInfos
 from utils.system_utils import searchForMaxIteration
 

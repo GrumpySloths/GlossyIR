@@ -194,6 +194,7 @@ class _RasterizeGaussians(torch.autograd.Function):
         torch.Tensor,
         None,
     ]:
+        # print("执行backward 过程")
         # Restore necessary values from context
         num_rendered = ctx.num_rendered
         raster_settings = ctx.raster_settings
@@ -248,6 +249,8 @@ class _RasterizeGaussians(torch.autograd.Function):
             raster_settings.debug,
         )
 
+        # print("grad_out_color shape:", grad_out_color.shape)
+        # print("grad out opacity shape:", grad_out_opacity.shape)
         # Compute gradients for relevant tensors by invoking backward method
         if raster_settings.debug:
             cpu_args = cpu_deep_copy_tuple(args)  # Copy them before they can be corrupted
@@ -302,6 +305,7 @@ class _RasterizeGaussians(torch.autograd.Function):
             None,
         )
 
+        # print("执行backward 结束")
         return grads
 
 

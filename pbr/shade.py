@@ -149,6 +149,8 @@ def pbr_shading(
     # specular
     NoV = saturate_dot(normals, view_dirs)  # [1, H, W, 1]
     fg_uv = torch.cat((NoV, roughness), dim=-1)  # [1, H, W, 2]
+    #纹理本质上是一个映射关系，这里的查询结果对应的是高光部分brdf的积分，无外乎输入变量是Nov以及roughness,roughness会
+    #直接关联pbr中的DFG
     fg_lookup = dr.texture(
         brdf_lut,  # [1, 256, 256, 2]
         fg_uv.contiguous(),  # [1, H, W, 2]
@@ -156,7 +158,8 @@ def pbr_shading(
         boundary_mode="clamp",
     )  # [1, H, W, 2]
 
-    # Roughness adjusted specular env lookup
+    # Roughness adjusted specular env lookup，该纹理查询对应的是specular light split sum形式积分的另一部分，对应的
+    #是光照部分的积分，其输入变量是反射光方向，上述建立纹理的代码本质上都是在进行一个预计算，这样可以减少计算量
     miplevel = light.get_mip(roughness)  # [1, H, W, 1]
     spec = dr.texture(
         light.specular[0][None, ...],  # [1, 6, env_res, env_res, 3]

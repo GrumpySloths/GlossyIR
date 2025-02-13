@@ -21,7 +21,7 @@ import torch.nn.functional as F
 from arguments import GroupParams
 from scene.cameras import Camera
 from scene.dataset_readers import sceneLoadTypeCallbacks
-from scene.gaussian_model import GaussianModel
+from scene.aussian_model import GaussianModel
 import sys
 sys.path.append(".")
 
@@ -39,12 +39,13 @@ class Scene:
         load_iteration: Optional[int] = None,
         shuffle: bool = True,
         resolution_scales: List[float] = [1.0],
+        ply_path=None,
     ) -> None:
         """b
         :param path: Path to colmap scene main folder.
         """
         self.model_path = args.model_path
-        self.loaded_iter = None
+        self.loaded_iter = load_iteration 
         self.gaussians = gaussians
         self.canonical_rays: torch.Tensor
 
@@ -53,6 +54,7 @@ class Scene:
                 self.loaded_iter = searchForMaxIteration(
                     os.path.join(self.model_path, "point_cloud")
                 )
+                print("Loading trained model at iteration :", self.loaded_iter)
             else:
                 self.loaded_iter = load_iteration
             print(f"Loading trained model at iteration {self.loaded_iter}")
@@ -65,7 +67,7 @@ class Scene:
         elif os.path.exists(os.path.join(args.source_path, "transforms_train.json")):
             print("Found transforms_train.json file, assuming Blender data set!")
             scene_info = sceneLoadTypeCallbacks["Blender"](
-                args.source_path, args.white_background, args.eval
+                args.source_path, args.white_background, args.eval,ply_path=ply_path
             )
         else:
             assert False, "Could not recognize scene type!"
@@ -86,7 +88,7 @@ class Scene:
                 json_cams.append(camera_to_JSON(id, cam))
             with open(os.path.join(self.model_path, "cameras.json"), "w") as file:
                 json.dump(json_cams, file)
-
+        
         if shuffle:
             random.shuffle(scene_info.train_cameras)  # Multi-res consistent random shuffling
             # # NOTE: I do not want to shuffle the test set
@@ -105,7 +107,8 @@ class Scene:
             )
 
         if self.loaded_iter:
-            self.gaussians.load_ply(
+            #加载稀疏点云
+            self.gaussians.load_ply_sparse_gaussian(
                 os.path.join(
                     self.model_path,
                     "point_cloud",
@@ -113,8 +116,13 @@ class Scene:
                     "point_cloud.ply",
                 )
             )
+            self.gaussians.load_mlp_checkpoints(os.path.join(self.model_path,
+                                                           "point_cloud",
+                                                           "iteration_" + str(self.loaded_iter)))
         else:
-            self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent)
+            # self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent)
+            print("没有load_iter,直接从初始化点云加载数据")
+            self.gaussians.create_from_pcd_anchor(scene_info.point_cloud, self.cameras_extent)
 
     def save(self, iteration: int) -> None:
         point_cloud_path = os.path.join(
@@ -122,6 +130,11 @@ class Scene:
         )
         self.gaussians.save_ply(os.path.join(point_cloud_path, "point_cloud.ply"))
 
+    def save_anchor(self, iteration):
+        point_cloud_path = os.path.join(self.model_path, "point_cloud/iteration_{}".format(iteration))
+        self.gaussians.save_ply_anchor(os.path.join(point_cloud_path, "point_cloud.ply"))
+        self.gaussians.save_mlp_checkpoints(point_cloud_path)
+        
     def getTrainCameras(self, scale: float = 1.0) -> List[Camera]:
         return self.train_cameras[scale]
 

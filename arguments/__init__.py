@@ -51,6 +51,7 @@ class ParamGroup:
 
 class ModelParams(ParamGroup):
     def __init__(self, parser: ArgumentParser, sentinel=False) -> None:
+        self.appearance_dim = 0
         self.sh_degree = 3
         self._source_path = ""
         self._model_path = ""
@@ -78,23 +79,90 @@ class PipelineParams(ParamGroup):
 
 class OptimizationParams(ParamGroup):
     def __init__(self, parser: ArgumentParser) -> None:
+        # self.iterations = 30_000
+        # self.position_lr_init = 0.00016
+        # self.position_lr_final = 0.0000016
+        # self.position_lr_delay_mult = 0.01
+        # self.position_lr_max_steps = 30_000
+        # self.feature_lr = 0.0025
+        # self.opacity_lr = 0.05
+        # self.scaling_lr = 0.005
+        # self.rotation_lr = 0.001
+        # self.percent_dense = 0.01
+        # self.lambda_dssim = 0.2
+        # self.densification_interval = 100
+        # self.opacity_reset_interval = 3000
+        # self.densify_from_iter = 500
+        # self.densify_until_iter = 15_000
+        # self.densify_grad_threshold = 0.0002
+        self.random_background = False
+        #pbr optimization 属性添加和扩展=========================
         self.iterations = 30_000
-        self.position_lr_init = 0.00016
-        self.position_lr_final = 0.0000016
+        self.position_lr_init = 0.0
+        self.position_lr_final = 0.0
         self.position_lr_delay_mult = 0.01
         self.position_lr_max_steps = 30_000
-        self.feature_lr = 0.0025
-        self.opacity_lr = 0.05
-        self.scaling_lr = 0.005
-        self.rotation_lr = 0.001
+        
+        self.offset_lr_init = 0.01
+        self.offset_lr_final = 0.0001
+        self.offset_lr_delay_mult = 0.01
+        self.offset_lr_max_steps = 30_000
+
+        self.feature_lr = 0.0075
+        self.pbr_feature_lr = 0.0075
+
+        self.opacity_lr = 0.02
+        self.scaling_lr = 0.007
+        self.rotation_lr = 0.002
+        #pbr属性扩展
+        self.normal_lr = 0.005
+        self.albedo_lr = 0.005
+        self.roughness_lr = 0.005
+        self.metallic_lr = 0.005
+        
+        self.mlp_opacity_lr_init = 0.002
+        self.mlp_opacity_lr_final = 0.00002  
+        self.mlp_opacity_lr_delay_mult = 0.01
+        self.mlp_opacity_lr_max_steps = 30_000
+
+        self.mlp_cov_lr_init = 0.004
+        self.mlp_cov_lr_final = 0.004
+        self.mlp_cov_lr_delay_mult = 0.01
+        self.mlp_cov_lr_max_steps = 30_000
+        
+        self.mlp_color_lr_init = 0.008
+        self.mlp_color_lr_final = 0.00005
+        self.mlp_color_lr_delay_mult = 0.01
+        self.mlp_color_lr_max_steps = 30_000
+        #pbr属性扩展
+        self.mlp_pbr_lr_init = 0.004
+        self.mlp_pbr_lr_final=0.004
+        self.mlp_pbr_lr_delay_mult = 0.01
+        self.mlp_pbr_lr_max_steps = 30_000
+         
+        self.mlp_featurebank_lr_init = 0.01
+        self.mlp_featurebank_lr_final = 0.00001
+        self.mlp_featurebank_lr_delay_mult = 0.01
+        self.mlp_featurebank_lr_max_steps = 30_000
+
+        self.appearance_lr_init = 0.05
+        self.appearance_lr_final = 0.0005
+        self.appearance_lr_delay_mult = 0.01
+        self.appearance_lr_max_steps = 30_000
+
         self.percent_dense = 0.01
         self.lambda_dssim = 0.2
-        self.densification_interval = 100
-        self.opacity_reset_interval = 3000
-        self.densify_from_iter = 500
-        self.densify_until_iter = 15_000
+        
+        # for anchor densification
+        self.start_stat = 500
+        self.update_from = 1500
+        self.update_interval = 100
+        self.update_until = 15_000
+        
+        self.min_opacity = 0.005
+        self.success_threshold = 0.8
         self.densify_grad_threshold = 0.0002
-        self.random_background = False
+        #pbr optimization 属性添加和扩展=========================
         super().__init__(parser, "Optimization Parameters")
 
 

@@ -208,7 +208,7 @@ class GaussianModel:
     def create_from_pcd(self, pcd: BasicPointCloud, spatial_lr_scale: float) -> None:
         self.spatial_lr_scale = spatial_lr_scale
         fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().cuda()
-        fused_color = RGB2SH(torch.tensor(np.asarray(pcd.colors)).float().cuda()) #这里的fused_color是rgb基色，相当于f_dc，即degree为0对应的结果
+        fused_color = RGB2SH(torch.tensor(np.asarray(pcd.colors)).float().cuda())
         features = (
             torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().cuda()
         )
@@ -238,7 +238,7 @@ class GaussianModel:
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
         self._features_dc = nn.Parameter(
             features[:, :, 0:1].transpose(1, 2).contiguous().requires_grad_(True)
-        )  #这里通过transpose将features维度从(P,3,SH_coeffs)转化为(P,SH_coeffs,3)主要是便于后续的计算和统一，即任意tensor最后一个维度都代表rgb channel
+        )
         self._features_rest = nn.Parameter(
             features[:, :, 1:].transpose(1, 2).contiguous().requires_grad_(True)
         )
@@ -252,7 +252,7 @@ class GaussianModel:
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
     def training_setup(self, training_args: GroupParams) -> None:
-        self.percent_dense = training_args.percent_dense  #0.01
+        self.percent_dense = training_args.percent_dense
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
 
