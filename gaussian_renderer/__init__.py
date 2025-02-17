@@ -124,7 +124,7 @@ def generate_neural_gaussians(viewpoint_camera, pc : GaussianModel, visible_mask
     normal=pc.normal_activation(pbr[:,:3])
     albedo=pc.material_activation(pbr[:,3:6])
     roughness=pc.material_activation(pbr[:,6])
-    metallic=pc.material_activation(pbr[:,7])
+    metallic=pc.material_activation(pbr[:,7])  #比较疑惑的一个点是metallic解耦出来的值是有效的
     #修改shape以适应自定义cuda的前向和后向传播过程 
     roughness=roughness.reshape([-1,1])
     metallic=metallic.reshape([-1,1])
@@ -307,7 +307,7 @@ def render(
         F.normalize(normal_map, dim=0, p=2),
         normal_map,
     )
-
+    
     # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
     # They will be excluded from value updates used in the splitting criteria.
     if is_training:

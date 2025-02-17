@@ -4,9 +4,17 @@ import uuid
 from argparse import ArgumentParser, Namespace
 from random import randint
 from typing import Dict, List, Optional, Tuple, Union
+import numpy as np
+
+import subprocess
+cmd = 'nvidia-smi -q -d Memory |grep -A4 GPU|grep Used'
+result = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE).stdout.decode().split('\n')
+os.environ['CUDA_VISIBLE_DEVICES']=str(np.argmin([int(x.split()[2]) for x in result[:-1]]))
+
+os.system('echo $CUDA_VISIBLE_DEVICES')
+
 
 import kornia
-import numpy as np
 import nvdiffrast.torch as dr
 import torch
 import torch.nn.functional as F
@@ -139,11 +147,24 @@ def training(
     bound: float = 1.5,
     indirect: bool = False,
     pbr_training:bool=False,
+    logger=None,
 ) -> None:
     first_iter = 0
     # gaussians = GaussianModel(dataset.sh_degree)  #dataset.sh_degree=3
 
-    gaussians = GaussianModel()  #dataset.sh_degree=3
+    gaussians = GaussianModel(feat_dim=dataset.feat_dim,
+                              pbr_feature_dim=dataset.pbr_feature_dim,
+                              n_offsets=dataset.n_offsets,
+                              voxel_size=dataset.voxel_size,
+                              update_depth=dataset.update_depth,
+                              update_init_factor=dataset.update_init_factor,
+                              update_hierachy_factor=dataset.update_hierachy_factor,
+                              use_feat_bank=dataset.use_feat_bank,
+                              ratio=dataset.ratio,
+                              add_color_dist=dataset.add_color_dist,
+                              add_cov_dist=dataset.add_cov_dist,
+                              add_opacity_dist=dataset.add_opacity_dist,
+                              add_pbr_dist=dataset.add_pbr_dist)  #dataset.sh_degree=3
     #根据是否进行pbr_training选择是初始化场景还是从已经训练好的场景中加载数据
     if pbr_training:
         first_iter=pbr_iteration
@@ -444,10 +465,12 @@ def training(
                 gamma=gamma,
                 renderFunc=render,
                 renderArgs=(pipe, background), 
+                logger=logger
             )
             
             if (iteration in saving_iterations):
-                # scene.save(iteration)
+                if logger is not None:
+                    logger.info("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save_anchor(iteration)
             
             # densification
@@ -473,6 +496,8 @@ def training(
                     light_optimizer.zero_grad(set_to_none=True)
                     cubemap.clamp_(min=0.0)
             if (iteration in checkpoint_iterations):
+                if logger is not None:
+                    logger.info("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture_anchor(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
 
         # with torch.no_grad():
@@ -566,8 +591,8 @@ def prepare_output_and_logger(args: GroupParams) -> Optional[SummaryWriter]:
         args.model_path = os.path.join("./output/", unique_str[0:10])
 
     # Add timestamp to model path
-    timestamp = datetime.now().strftime("%Y%m%d_%H:%M:%S")
-    args.model_path = os.path.join(args.model_path, timestamp)
+    # timestamp = datetime.now().strftime("%Y%m%d_%H:%M:%S")
+    # args.model_path = os.path.join(args.model_path, timestamp)
     # Set up output folder
     print(f"Output folder: {args.model_path}")
     os.makedirs(args.model_path, exist_ok=True)
@@ -621,7 +646,7 @@ def training_report_anchor( tb_writer, dataset_name, iteration, Ll1, loss,
                 for idx, viewpoint in enumerate(config['cameras']):
                     # voxel_visible_mask = prefilter_voxel(viewpoint, scene.gaussians, *renderArgs)
                     voxel_visible_mask=torch.ones(scene.gaussians.get_anchor.shape[0],dtype=torch.bool,device="cuda")
-                    render_result = renderFunc(viewpoint, scene.gaussians, *renderArgs, visible_mask=voxel_visible_mask)
+                    render_result = renderFunc(viewpoint, scene.gaussians, *renderArgs, visible_mask=voxel_visible_mask,derive_normal=True)
                     image=torch.clamp(render_result["render"], 0.0, 1.0)
                     depth_map = render_result["depth_map"]
                     normal_map = render_result["normal_map"]
@@ -717,10 +742,27 @@ def training_report_anchor( tb_writer, dataset_name, iteration, Ll1, loss,
                     # gt_image_np=cv2.cvtColor(gt_image_np, cv2.COLOR_RGB2BGR)
                     # cv2.imwrite(f"gt_image_{config['name']}_{viewpoint.image_name}_{iteration}.png", gt_image_np)
                     if idx == 0:
-                        sample_dir = os.path.join(".", "samples")
+                        sample_dir = os.path.join(scene.model_path, "samples")
                         os.makedirs(sample_dir, exist_ok=True)
                         torchvision.utils.save_image(image, os.path.join(sample_dir, f"render_{iteration}.png"))
                         torchvision.utils.save_image(gt_image, os.path.join(sample_dir, f"gt_{iteration}.png"))
+                        torchvision.utils.save_image(normal_map, os.path.join(sample_dir, f"normal_{iteration}.png"))
+                        torchvision.utils.save_image(normal_map_from_depth, os.path.join(sample_dir, f"normal_map_from_depth_{iteration}.png"))
+                        torchvision.utils.save_image(depth_map, os.path.join(sample_dir, f"depth_map_{iteration}.png"))
+                        if iteration > pbr_iteration:
+                            torchvision.utils.save_image(albedo_map, os.path.join(sample_dir, f"albedo_map_{iteration}.png"))
+                            torchvision.utils.save_image(metallic_map, os.path.join(sample_dir, f"metallic_map_{iteration}.png"))
+                            torchvision.utils.save_image(roughness_map, os.path.join(sample_dir, f"roughness_map_{iteration}.png"))
+                            torchvision.utils.save_image(render_rgb, os.path.join(sample_dir, f"pbr_render_rgb_{iteration}.png"))
+                            torchvision.utils.save_image(diffuse_rgb, os.path.join(sample_dir, f"pbr_diffuse_rgb_{iteration}.png"))
+                            torchvision.utils.save_image(specular_rgb, os.path.join(sample_dir, f"pbr_specular_rgb_{iteration}.png"))
+                            #保存envirment map
+                            envmap=light.export_envmap(return_img=True)
+                            envmap=envmap.clamp(min=0.0, max=1.0).permute(2, 0, 1)
+                            # envmap=envmap.permute(1, 2, 0).cpu().numpy()
+                            print("envmap.shape:",envmap.shape)
+                            print("specular_rgb.shape:",specular_rgb.shape)
+                            torchvision.utils.save_image(envmap, os.path.join(sample_dir, f"envmap_{iteration}.png"))
                          
                     if tb_writer and (idx < 5):
                         tb_writer.add_images(f'{dataset_name}/'+config['name'] + "_view_{}/render".format(viewpoint.image_name), image[None], global_step=iteration)
@@ -747,6 +789,10 @@ def training_report_anchor( tb_writer, dataset_name, iteration, Ll1, loss,
                                 resize_tensorboard_img(pbr_image, 2400)[None],
                                 global_step=iteration,
                             )
+                            #保存envirment map
+                            envmap=light.export_envmap(return_img=True)
+                            envmap=envmap.clamp(min=0.0, max=1.0).permute(2, 0, 1)
+                            tb_writer.add_images(f'{dataset_name}/'+config['name'] + "_view_{}/envmap".format(viewpoint.image_name), envmap[None], global_step=iteration)
                             
                         if wandb:
                             render_image_list.append(image[None])
@@ -764,8 +810,13 @@ def training_report_anchor( tb_writer, dataset_name, iteration, Ll1, loss,
                 
                 psnr_test /= len(config['cameras'])
                 l1_test /= len(config['cameras'])          
-                # logger.info("\n[ITER {}] Evaluating {}: L1 {} PSNR {}".format(iteration, config['name'], l1_test, psnr_test))
-                print("\n[ITER {}] Evaluating {}: L1 {} PSNR {}".format(iteration, config['name'], l1_test, psnr_test))
+                if logger is not None:
+                    #记录下当前iteration下的anchor数量
+                    logger.info(f"anchor number at iteration {iteration}: {scene.gaussians.get_anchor.shape[0]}")
+                    logger.info("\n[ITER {}] Evaluating {}: L1 {} PSNR {}".format(iteration, config['name'], l1_test, psnr_test))
+                else:
+                    print(f"anchor number at iteration {iteration}: {scene.gaussians.get_anchor.shape[0]}")
+                    print("\n[ITER {}] Evaluating {}: L1 {} PSNR {}".format(iteration, config['name'], l1_test, psnr_test))
 
                 
                 if tb_writer:
@@ -1033,6 +1084,28 @@ def training_report(
             tb_writer.add_scalar("total_points", scene.gaussians.get_xyz.shape[0], iteration)
         torch.cuda.empty_cache()
 
+def get_logger(path):
+    import logging
+
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+
+    # 移除根 logger 的所有 handler
+    for handler in logger.handlers[:]:
+        logger.removeHandler(handler)
+
+    fileinfo = logging.FileHandler(os.path.join(path, "outputs.log"))
+    fileinfo.setLevel(logging.INFO)
+    controlshow = logging.StreamHandler()
+    controlshow.setLevel(logging.INFO)
+    formatter = logging.Formatter("%(asctime)s - %(levelname)s: %(message)s")
+    fileinfo.setFormatter(formatter)
+    controlshow.setFormatter(formatter)
+
+    logger.addHandler(fileinfo)
+    logger.addHandler(controlshow)
+
+    return logger
 
 if __name__ == "__main__":
     # Set up command line argument parser
@@ -1079,6 +1152,10 @@ if __name__ == "__main__":
     # Initialize system state (RNG)
     safe_state(args.quiet)
 
+    os.makedirs(args.model_path, exist_ok=True)
+    logger = get_logger(args.model_path)
+    logger.info(f'args: {args}')
+
     # Start GUI server, configure and run training
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
     training(
@@ -1100,7 +1177,11 @@ if __name__ == "__main__":
         bound=args.bound,
         indirect=args.indirect,
         pbr_training=args.pbr_training,
+        logger=logger
     )
 
     # All done
-    print("\nTraining complete.")
+    if logger is not None:
+        logger.info("\nTraining complete.")
+    else:
+        print("\nTraining complete.")

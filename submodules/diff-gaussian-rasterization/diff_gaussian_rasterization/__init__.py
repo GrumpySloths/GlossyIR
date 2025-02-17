@@ -404,6 +404,7 @@ class GaussianRasterizer(nn.Module):
         )
 
         if derive_normal:
+            # print("Derive normal 设置为True")
             focal_x = raster_settings.image_width / (2.0 * raster_settings.tanfovx)
             focal_y = raster_settings.image_height / (2.0 * raster_settings.tanfovy)
             # # NOTE: trick to smooth depth for better normal
@@ -418,6 +419,7 @@ class GaussianRasterizer(nn.Module):
                 depth_filter,
             )
         else:
+            # print("Derive normal 设置为False")
             normal_from_depth = torch.zeros_like(out_normal)
 
         return (

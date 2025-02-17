@@ -53,6 +53,17 @@ class ModelParams(ParamGroup):
     def __init__(self, parser: ArgumentParser, sentinel=False) -> None:
         self.appearance_dim = 0
         self.sh_degree = 3
+        #anchor 属性添加
+        self.feat_dim = 32
+        self.pbr_feature_dim = 32
+        self.n_offsets = 10
+        self.voxel_size =  0.001 # if voxel_size<=0, using 1nn dist
+        self.update_depth = 3
+        self.update_init_factor = 16
+        self.update_hierachy_factor = 4
+        self.use_feat_bank = False
+        
+
         self._source_path = ""
         self._model_path = ""
         self._logdir_path = ""
@@ -61,6 +72,14 @@ class ModelParams(ParamGroup):
         self._white_background = False
         self.data_device = "cuda"
         self.eval = False
+        # In the Bungeenerf dataset, we propose to set the following three parameters to True,
+        # Because there are enough dist variations.
+        self.add_opacity_dist = False
+        self.add_cov_dist = False
+        self.add_color_dist = False
+        self.add_pbr_dist = False   
+        self.ratio = 1 # sampling the input point cloud
+
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args: Namespace) -> GroupParams:

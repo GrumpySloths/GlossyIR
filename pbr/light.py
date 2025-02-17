@@ -73,6 +73,10 @@ class CubemapLight(nn.Module):
         base = (
             torch.rand(6, base_res, base_res, 3, dtype=torch.float32, device="cuda") * scale + bias
         )
+        #这里CubemapLight作为可训练参数参与可微渲染的构建思路在于Cubemaplight作为输入参数，在此基础上构建多层的mipmap贴图，
+        # 不同的贴图代表不同分辨率的diffuse map以及specular map,这个过程需要一个自定义算子来构建从输入cubemap到多层mipmap的计算图,
+        # 然后在多层mipmap贴图的基础上进行pbr渲染过程，进而构建出整个计算图，将最终渲染的结果作为loss反向传播到CubemapLight的参数上，
+        # 这样就可以训练出一个合适的CubemapLight参数，从而实现了可微渲染的过程
         self.base = nn.Parameter(base)  #shape [6,256,256,3]
         self.register_parameter("env_base", self.base)
 
